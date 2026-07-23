@@ -27,7 +27,15 @@ grouped into labeled sections — workspaces (⊞), fixed-dir templates (⊡), a
 the projects below `dev_dirs`.
 A project is a repository root (a `.git` is present) — grouping folders and
 repos nested inside other repos are not listed, and the search never
-descends into a repository. Type `/` to filter, enter to apply — picking a
+descends into a repository. Initially only *recent* projects are shown —
+those with git activity in the last `recent_days` (default 14), newest
+first and grouped into time sections (today, yesterday, last 7 days, …);
+`a` toggles the full alphabetical list, and filtering always searches all
+projects. Recency is read from the mtimes of `.git/index`, `HEAD`, and
+`FETCH_HEAD` — local stats only, no git commands, no network; since IDEs
+refresh git status on save, the index mtime closely tracks the last time a
+project was actually worked on. Set `recent_days: -1` to always show all.
+Type `/` to filter, enter to apply — picking a
 project asks for the template in a second step, offering only templates
 without a fixed dir (the default template preselected); if just one
 qualifies it is applied directly without asking. Esc goes back, q quits.
@@ -64,6 +72,7 @@ Inside tmux the window is added to the current session; outside, the fallback
 dev_dirs:
   - ~/dev
 search_depth: 3
+recent_days: 14   # ui: initially only projects active in the last N days (-1: all)
 session: dev
 default_template: dev
 templates:

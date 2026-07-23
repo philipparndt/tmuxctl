@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 var skipDirs = map[string]bool{
@@ -94,4 +95,23 @@ func walk(root string, depth, maxDepth int, fn func(path, name string, isRoot bo
 func isProjectRoot(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, ".git"))
 	return err == nil
+}
+
+// lastActivity estimates when a project was last worked on, from the mtimes
+// of .git files that change on commits, checkouts, staging, and even
+// `git status` (which rewrites the index) — a cheap stat-only proxy that
+// avoids running git per project. Zero time when nothing is readable.
+func lastActivity(dir string) time.Time {
+	var t time.Time
+	for _, p := range []string{
+		filepath.Join(".git", "index"),
+		filepath.Join(".git", "HEAD"),
+		filepath.Join(".git", "FETCH_HEAD"),
+		".git", // worktrees: .git is a file
+	} {
+		if fi, err := os.Stat(filepath.Join(dir, p)); err == nil && fi.ModTime().After(t) {
+			t = fi.ModTime()
+		}
+	}
+	return t
 }

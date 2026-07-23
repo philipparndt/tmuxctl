@@ -184,6 +184,10 @@ type Config struct {
 	// SearchDepth is how many directory levels below each dev dir are
 	// searched (1 = direct children only). Default 3.
 	SearchDepth int `yaml:"search_depth"`
+	// RecentDays: the ui initially lists only projects with git activity in
+	// the last N days; "a" or filtering reaches all of them. Default 14;
+	// -1 always shows all projects.
+	RecentDays int `yaml:"recent_days"`
 	// Session is the tmux session used when running outside tmux. Default "dev".
 	Session string `yaml:"session"`
 	// DefaultTemplate is the template used by `tmuxctl add` unless -t is given.
@@ -196,6 +200,7 @@ const defaultConfig = `# tmuxctl configuration
 dev_dirs:
   - ~/dev
 search_depth: 3
+recent_days: 14   # ui: initially only projects active in the last N days (-1: all)
 session: dev
 default_template: dev
 templates:
@@ -267,6 +272,9 @@ func loadConfig() (*Config, error) {
 	}
 	if cfg.SearchDepth <= 0 {
 		cfg.SearchDepth = 3
+	}
+	if cfg.RecentDays == 0 {
+		cfg.RecentDays = 14
 	}
 	if cfg.Session == "" {
 		cfg.Session = "dev"

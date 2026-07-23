@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestWalkReportsProjectRootsAndSkipsNestedRepos(t *testing.T) {
@@ -43,5 +44,38 @@ func TestWalkReportsProjectRootsAndSkipsNestedRepos(t *testing.T) {
 	}
 	if !all["acme"] {
 		t.Error("grouping dirs must still be visited for name search")
+	}
+}
+
+func TestLastActivity(t *testing.T) {
+	repo := t.TempDir()
+	if !lastActivity(repo).IsZero() {
+		t.Error("dir without .git must report zero time")
+	}
+
+	git := filepath.Join(repo, ".git")
+	if err := os.Mkdir(git, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	recent := time.Now().Add(-1 * time.Hour)
+	for f, mtime := range map[string]time.Time{"HEAD": old, "index": recent} {
+		p := filepath.Join(git, f)
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// the .git dir itself just changed (files were created) — pin it old so
+	// the newest tracked file (the index) must win
+	if err := os.Chtimes(git, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	got := lastActivity(repo)
+	if got.Sub(recent).Abs() > time.Second {
+		t.Errorf("want index mtime %v, got %v", recent, got)
 	}
 }
