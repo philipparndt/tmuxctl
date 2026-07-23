@@ -20,6 +20,9 @@ Usage:
                         interactive picker for all of the above
   tmuxctl templates     list configured templates
   tmuxctl workspaces    list configured workspaces
+  tmuxctl setup [-key key] [-n]
+                        bind the picker popup in the tmux config
+                        (prefix + key, default "-"); -n prints the block
 
 [project] is a folder name or substring, searched below the configured
 dev_dirs (e.g. "apigateway-go" matches ~/dev/acme/acme-apigateway-go).
@@ -50,6 +53,8 @@ func main() {
 		printSorted(mapKeys(cfg.Templates))
 	case "workspaces":
 		printSorted(mapKeys(cfg.Workspaces))
+	case "setup":
+		cmdSetup(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:

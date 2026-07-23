@@ -40,7 +40,19 @@ project asks for the template in a second step, offering only templates
 without a fixed dir (the default template preselected); if just one
 qualifies it is applied directly without asking. Esc goes back, q quits.
 
-Bind it to a tmux popup (prefix + `-`) in `~/.tmux.conf`:
+Bind it to a tmux popup with:
+
+```sh
+tmuxctl setup           # binds prefix + "-" in ~/.tmux.conf
+tmuxctl setup -key o    # ... or another prefix key
+tmuxctl setup -n        # just print the config block
+```
+
+`setup` writes a marker-delimited block (`# >>> tmuxctl >>>` … `# <<< tmuxctl
+<<<`) into `~/.tmux.conf` (or `~/.config/tmux/tmux.conf` if only that
+exists), pointing at the running binary's path. Re-running it replaces only
+that block, so it is safe after every update or key change; a running tmux
+server is reloaded immediately. The binding:
 
 ```tmux
 bind - display-popup -E -w 80% -h 70% "tmuxctl ui || { echo; echo '-- failed, press any key --'; read -r _; }"
