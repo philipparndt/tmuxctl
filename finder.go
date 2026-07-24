@@ -39,13 +39,7 @@ func findProject(cfg *Config, query string) (string, error) {
 	}
 
 	pick := func(matches []string) (string, error) {
-		sort.Slice(matches, func(i, j int) bool {
-			di, dj := strings.Count(matches[i], string(filepath.Separator)), strings.Count(matches[j], string(filepath.Separator))
-			if di != dj {
-				return di < dj
-			}
-			return matches[i] < matches[j]
-		})
+		sortByActivity(matches)
 		if len(matches) > 1 {
 			return chooseMatch(query, matches)
 		}
@@ -59,6 +53,28 @@ func findProject(cfg *Config, query string) (string, error) {
 		return pick(partial)
 	}
 	return "", fmt.Errorf("no project matching %q found under %s", query, strings.Join(cfg.DevDirs, ", "))
+}
+
+// sortByActivity orders candidate locations by when they were last worked
+// on, most recent first — among several matches the one last used is almost
+// always the wanted one. Ties (typically folders without .git metadata,
+// which all report the zero time) fall back to shallower paths, then name.
+func sortByActivity(matches []string) {
+	times := make(map[string]time.Time, len(matches))
+	for _, m := range matches {
+		times[m] = lastActivity(m)
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		ti, tj := times[matches[i]], times[matches[j]]
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		di, dj := strings.Count(matches[i], string(filepath.Separator)), strings.Count(matches[j], string(filepath.Separator))
+		if di != dj {
+			return di < dj
+		}
+		return matches[i] < matches[j]
+	})
 }
 
 // walk visits directories below root up to maxDepth levels, calling fn for

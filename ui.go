@@ -21,7 +21,7 @@ var (
 	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
 	selStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
 	detailStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	titleStyle = lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("230")).Bold(true).Padding(0, 1)
+	titleStyle  = lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("230")).Bold(true).Padding(0, 1)
 	// filterPromptStyle is the "Filter: " label — plain yellow text, no badge.
 	filterPromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
 )
@@ -154,9 +154,9 @@ func bucket(t, now time.Time) string {
 // non-selectable section headers.
 type compactDelegate struct{}
 
-func (compactDelegate) Height() int                             { return 1 }
-func (compactDelegate) Spacing() int                            { return 0 }
-func (compactDelegate) Update(tea.Msg, *list.Model) tea.Cmd     { return nil }
+func (compactDelegate) Height() int                         { return 1 }
+func (compactDelegate) Spacing() int                        { return 0 }
+func (compactDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
 func (compactDelegate) Render(w io.Writer, m list.Model, index int, it list.Item) {
 	p, ok := it.(pickItem)
 	if !ok {
@@ -256,8 +256,10 @@ func newUIModel(cfg *Config) uiModel {
 		})
 	}
 	now := time.Now()
+	activity := make(map[string]time.Time, len(projects)) // FilterValue → last activity
 	for i := range projects {
 		projects[i].item.age = relAge(projects[i].t, now)
+		activity[projects[i].item.FilterValue()] = projects[i].t
 	}
 	sort.Slice(projects, func(i, j int) bool { return projects[i].item.name < projects[j].item.name })
 	var allProjects []list.Item
@@ -352,6 +354,7 @@ func newUIModel(cfg *Config) uiModel {
 	// list must not also render them in its title bar.
 	picker.SetShowTitle(false)
 	picker.SetShowFilter(false)
+	picker.Filter = activityRankedFilter(activity)
 	styleFilter(&picker)
 	skipHeader(&picker, true)
 
@@ -365,6 +368,48 @@ func newUIModel(cfg *Config) uiModel {
 
 	return uiModel{cfg: cfg, picker: picker, tplPicker: tplPicker,
 		itemsRecent: itemsRecent, itemsAll: itemsAll}
+}
+
+// activityRankedFilter orders filter matches by the projects' last activity,
+// most recently used first, instead of the default fuzzy-match quality —
+// when a filter hits several locations, the one last worked on is almost
+// always the wanted one.
+//
+// Recency only competes among items containing the term as a literal
+// substring. The fuzzy filter also matches scattered subsequences (e.g.
+// "hue" hits unifi-access via smart_h_ome/_u_nifi-acc_e_ss), and date order
+// must not let such a barely-matching item overtake a real match just
+// because it was used recently — fuzzy-only matches stay below all
+// substring matches, in match-quality order.
+//
+// activity maps an item's FilterValue to its last activity; entries missing
+// from the map (workspaces, templates) sort before all projects, and ties
+// keep the fuzzy filter's order.
+func activityRankedFilter(activity map[string]time.Time) list.FilterFunc {
+	return func(term string, targets []string) []list.Rank {
+		ranks := list.DefaultFilter(term, targets)
+		q := strings.ToLower(term)
+		substr := make([]bool, len(targets))
+		for _, r := range ranks {
+			substr[r.Index] = strings.Contains(strings.ToLower(targets[r.Index]), q)
+		}
+		sort.SliceStable(ranks, func(i, j int) bool {
+			si, sj := substr[ranks[i].Index], substr[ranks[j].Index]
+			if si != sj {
+				return si
+			}
+			if !si {
+				return false // both fuzzy-only: keep match-quality order
+			}
+			ti, iProj := activity[targets[ranks[i].Index]]
+			tj, jProj := activity[targets[ranks[j].Index]]
+			if iProj != jProj {
+				return !iProj
+			}
+			return ti.After(tj)
+		})
+		return ranks
+	}
 }
 
 // styleFilter makes entering filter mode obvious: a yellow "Filter: " label
