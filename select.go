@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -18,7 +19,15 @@ func chooseMatch(query string, matches []string) (string, error) {
 	defer tty.Close()
 
 	title := fmt.Sprintf("%d matches for %q — pick one (↑/↓ or j/k, enter to select, q to cancel):", len(matches), query)
-	idx, err := selectFrom(tty, title, matches)
+	labels := make([]string, len(matches))
+	now := time.Now()
+	for i, m := range matches {
+		labels[i] = m
+		if age := relAge(lastActivity(m), now); age != "" {
+			labels[i] += "  · " + age
+		}
+	}
+	idx, err := selectFrom(tty, title, labels)
 	if err != nil {
 		return "", err
 	}

@@ -16,9 +16,9 @@ func TestWalkReportsProjectRootsAndSkipsNestedRepos(t *testing.T) {
 	}
 	mk("acme", "acme-apigateway-go", ".git") // repo under a grouping dir
 	mk("acme", "acme-apigateway-go", "cmd")  // subdir of a repo
-	mk("standalone", ".git")                   // repo directly in dev dir
-	mk("standalone", "nested-repo", ".git")    // repo nested inside a repo
-	mk("empty-group")                          // grouping dir without repos
+	mk("standalone", ".git")                 // repo directly in dev dir
+	mk("standalone", "nested-repo", ".git")  // repo nested inside a repo
+	mk("empty-group")                        // grouping dir without repos
 
 	roots := map[string]bool{}
 	all := map[string]bool{}
@@ -44,6 +44,39 @@ func TestWalkReportsProjectRootsAndSkipsNestedRepos(t *testing.T) {
 	}
 	if !all["acme"] {
 		t.Error("grouping dirs must still be visited for name search")
+	}
+}
+
+func TestSortByActivityMostRecentlyUsedFirst(t *testing.T) {
+	dev := t.TempDir()
+	mkRepo := func(mtime time.Time, parts ...string) string {
+		dir := filepath.Join(append([]string{dev}, parts...)...)
+		git := filepath.Join(dir, ".git")
+		if err := os.MkdirAll(git, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(git, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	now := time.Now()
+	older := mkRepo(now.Add(-48*time.Hour), "group", "proj-a")
+	newest := mkRepo(now.Add(-time.Hour), "proj-b")
+	// no .git → zero activity; sorts last despite the shallow path and name
+	noGit := filepath.Join(dev, "aaa-proj")
+	if err := os.MkdirAll(noGit, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	matches := []string{noGit, older, newest}
+	sortByActivity(matches)
+
+	want := []string{newest, older, noGit}
+	for i := range want {
+		if matches[i] != want[i] {
+			t.Fatalf("want order %v, got %v", want, matches)
+		}
 	}
 }
 

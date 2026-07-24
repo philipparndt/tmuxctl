@@ -16,9 +16,9 @@ func TestBucket(t *testing.T) {
 		want string
 	}{
 		{day(0, 9), "TODAY"},
-		{day(0, 0), "TODAY"},        // exactly midnight
-		{day(-1, 23), "YESTERDAY"},  // late yesterday
-		{day(-1, 1), "YESTERDAY"},   // early yesterday
+		{day(0, 0), "TODAY"},       // exactly midnight
+		{day(-1, 23), "YESTERDAY"}, // late yesterday
+		{day(-1, 1), "YESTERDAY"},  // early yesterday
 		{day(-2, 12), "LAST 7 DAYS"},
 		{day(-6, 12), "LAST 7 DAYS"},
 		{day(-7, 12), "LAST 30 DAYS"},
@@ -28,6 +28,43 @@ func TestBucket(t *testing.T) {
 	for _, tt := range tests {
 		if got := bucket(tt.t, now); got != tt.want {
 			t.Errorf("bucket(%v): got %q, want %q", tt.t, got, tt.want)
+		}
+	}
+}
+
+func TestActivityRankedFilterMostRecentlyUsedFirst(t *testing.T) {
+	now := time.Date(2026, 7, 23, 18, 30, 0, 0, time.Local)
+	targets := []string{
+		"hue-old ~/dev/old/hue-old",           // substring match, used long ago
+		"unrelated ~/dev/unrelated",           // no match — must be filtered out
+		"hue-fresh ~/dev/smarthome/hue-fresh", // substring match, used recently
+		"hue-ws 2 windows",                    // workspace: no activity entry
+		// fuzzy-only match ("hue" scattered over smart_h_ome/_u_nifi-acc_e_ss),
+		// recently used — recency must NOT lift it above real substring matches
+		"unifi-access ~/dev/smarthome/unifi-access",
+	}
+	activity := map[string]time.Time{
+		targets[0]: now.AddDate(-2, 0, 0),
+		targets[1]: now,
+		targets[2]: now.Add(-time.Hour),
+		targets[4]: now.Add(-time.Minute),
+	}
+
+	ranks := activityRankedFilter(activity)("hue", targets)
+
+	var got []string
+	for _, r := range ranks {
+		got = append(got, targets[r.Index])
+	}
+	// workspaces/templates (no activity entry) first, then substring-matched
+	// projects by date, then fuzzy-only matches
+	want := []string{targets[3], targets[2], targets[0], targets[4]}
+	if len(got) != len(want) {
+		t.Fatalf("want %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("want order %v, got %v", want, got)
 		}
 	}
 }
