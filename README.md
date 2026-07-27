@@ -40,6 +40,17 @@ project asks for the template in a second step, offering only templates
 without a fixed dir (the default template preselected); if just one
 qualifies it is applied directly without asking. Esc goes back, q quits.
 
+`f` searches projects *by their files* — file names and file content —
+for when you remember a config file or a code snippet but not which project
+it lives in. Requires [ripgrep](https://github.com/BurntSushi/ripgrep)
+(`rg`). The search streams: project roots are swept in batches, most
+recently used first, so the likely hits appear within a few hundred
+milliseconds while older bulk fills in behind a progress hint; typing
+restarts the search, esc leaves the mode. Each result row shows the first
+matching file as evidence (`(content)` marks a content match, `+N` more
+matching files). Nothing of this runs outside `f` mode — the normal picker
+is untouched.
+
 Bind it to a tmux popup with:
 
 ```sh

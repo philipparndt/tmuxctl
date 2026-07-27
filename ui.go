@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -201,6 +202,17 @@ type uiModel struct {
 	showAll     bool // "a" pressed: keep the full list
 	expanded    bool // itemsAll swapped in for a running filter
 
+	// File-search mode ("f"): a live, debounced ripgrep sweep over file
+	// names and content, replacing the list items with matching projects.
+	// The search only ever runs inside this mode, so the normal picker
+	// stays exactly as fast as before.
+	searchMode bool
+	search     textinput.Model
+	searchSeq  int                 // debounce/staleness token for async results
+	searchDirs []string            // project roots, most recently used first
+	searchInfo map[string]pickItem // base project item per root, for result rows
+	searchHits []fileHit           // results streamed in so far, MRU order
+
 	// result, evaluated after the program quits
 	selWorkspace string
 	selTemplate  string
@@ -260,6 +272,16 @@ func newUIModel(cfg *Config) uiModel {
 	for i := range projects {
 		projects[i].item.age = relAge(projects[i].t, now)
 		activity[projects[i].item.FilterValue()] = projects[i].t
+	}
+	// project roots for the file search, most recently used first, so its
+	// results inherit the same recency order as everything else
+	byT := append([]projEntry(nil), projects...)
+	sort.SliceStable(byT, func(i, j int) bool { return byT[i].t.After(byT[j].t) })
+	searchDirs := make([]string, 0, len(byT))
+	searchInfo := make(map[string]pickItem, len(byT))
+	for _, p := range byT {
+		searchDirs = append(searchDirs, p.item.dir)
+		searchInfo[p.item.dir] = p.item
 	}
 	sort.Slice(projects, func(i, j int) bool { return projects[i].item.name < projects[j].item.name })
 	var allProjects []list.Item
@@ -348,7 +370,10 @@ func newUIModel(cfg *Config) uiModel {
 	picker.SetShowStatusBar(false)
 	picker.SetShowHelp(true)
 	picker.AdditionalShortHelpKeys = func() []key.Binding {
-		return []key.Binding{key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all projects"))}
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all projects")),
+			key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "file search")),
+		}
 	}
 	// We draw the title and filter on our own lines above the list, so the
 	// list must not also render them in its title bar.
@@ -368,8 +393,15 @@ func newUIModel(cfg *Config) uiModel {
 	styleFilter(&tplPicker)
 	tplPicker.Select(defaultIdx)
 
+	search := textinput.New()
+	search.Prompt = "Files: "
+	search.PromptStyle = filterPromptStyle
+	search.TextStyle = lipgloss.NewStyle().Bold(true)
+	search.Cursor.SetMode(cursor.CursorStatic)
+
 	return uiModel{cfg: cfg, picker: picker, tplPicker: tplPicker,
-		itemsRecent: itemsRecent, itemsAll: itemsAll}
+		itemsRecent: itemsRecent, itemsAll: itemsAll,
+		search: search, searchDirs: searchDirs, searchInfo: searchInfo}
 }
 
 // activityRankedFilter orders filter matches by the projects' last activity,
@@ -412,6 +444,67 @@ func activityRankedFilter(activity map[string]time.Time) list.FilterFunc {
 		})
 		return ranks
 	}
+}
+
+// File-search plumbing: typing bumps searchSeq and schedules a tick; when
+// the tick still carries the current seq (nothing typed since), the rg
+// sweep starts. It runs as a chain of batches over the project roots,
+// most recently used first, so the projects the term most likely refers
+// to answer in the first few hundred milliseconds while old bulk (a dev
+// tree can hold half a million files) streams in behind with a progress
+// hint. Every message carries seq; a stale seq drops the message and
+// thereby cancels the rest of that chain.
+const (
+	searchDebounce = 200 * time.Millisecond
+	searchMinChars = 2
+	searchBatch    = 25 // project roots per rg invocation
+)
+
+type searchTickMsg struct{ seq int }
+
+type searchBatchMsg struct {
+	seq  int
+	next int // index of the first root not yet searched
+	hits []fileHit
+	err  error
+}
+
+func searchAfterDebounce(seq int) tea.Cmd {
+	return tea.Tick(searchDebounce, func(time.Time) tea.Msg { return searchTickMsg{seq: seq} })
+}
+
+func runFileSearch(dirs []string, term string, seq, from int) tea.Cmd {
+	return func() tea.Msg {
+		to := min(from+searchBatch, len(dirs))
+		hits, err := fileSearch(dirs[from:to], term)
+		return searchBatchMsg{seq: seq, next: to, hits: hits, err: err}
+	}
+}
+
+// searchItems renders file-search results: one row per matched project in
+// the hits' (most recently used first) order, the matched file as evidence
+// in the detail column, and a dim hint while there is nothing to show.
+func (m uiModel) searchItems(hits []fileHit, hint string) []list.Item {
+	items := []list.Item{header("FILE MATCHES")}
+	for _, h := range hits {
+		it, ok := m.searchInfo[h.dir]
+		if !ok {
+			continue
+		}
+		ev := h.file
+		if h.content {
+			ev += " (content)"
+		}
+		if h.n > 1 {
+			ev += fmt.Sprintf(" +%d", h.n-1)
+		}
+		it.detail += " · " + ev
+		items = append(items, it)
+	}
+	if hint != "" {
+		items = append(items, pickItem{kind: kindHint, name: hint})
+	}
+	return items
 }
 
 // styleFilter makes entering filter mode obvious: a yellow "Filter: " label
@@ -504,6 +597,71 @@ func (m *uiModel) clearFilter() {
 
 func (m uiModel) Init() tea.Cmd { return nil }
 
+// selectProject resolves the template step for a picked project: quit
+// immediately when there is nothing to choose, otherwise advance to step 1.
+func (m uiModel) selectProject(it pickItem) (tea.Model, tea.Cmd) {
+	m.selDir = it.dir
+	switch items := m.tplPicker.Items(); len(items) {
+	case 0:
+		m.err = fmt.Errorf("no template without a fixed dir configured")
+		return m, tea.Quit
+	case 1: // nothing to choose — apply the only candidate
+		m.selTemplate = items[0].(pickItem).name
+		return m, tea.Quit
+	}
+	m.tplPicker.Title = "template for " + it.name
+	m.step = 1
+	return m, nil
+}
+
+// updateSearch handles keys while file-search mode is active: cursor and
+// selection keys drive the result list, esc leaves the mode, and everything
+// else edits the search input, (re)starting the debounced rg sweep.
+func (m uiModel) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.searchMode = false
+		m.search.Blur()
+		items := m.itemsRecent
+		if m.showAll {
+			items = m.itemsAll
+		}
+		m.picker.SetItems(items)
+		m.picker.Select(0)
+		skipHeader(&m.picker, true)
+		return m, nil
+	case "enter":
+		if it, ok := m.picker.SelectedItem().(pickItem); ok && it.kind == kindProject {
+			return m.selectProject(it)
+		}
+		return m, nil
+	case "up", "ctrl+p":
+		m.picker.CursorUp()
+		skipHeader(&m.picker, false)
+		return m, nil
+	case "down", "ctrl+n":
+		m.picker.CursorDown()
+		skipHeader(&m.picker, true)
+		return m, nil
+	}
+	before := m.search.Value()
+	var cmd tea.Cmd
+	m.search, cmd = m.search.Update(msg)
+	if m.search.Value() == before {
+		return m, cmd
+	}
+	m.searchSeq++
+	m.searchHits = nil
+	if len(strings.TrimSpace(m.search.Value())) < searchMinChars {
+		m.picker.SetItems(m.searchItems(nil, "type to search file names and content"))
+		return m, cmd
+	}
+	m.picker.SetItems(m.searchItems(nil, "searching…"))
+	return m, tea.Batch(cmd, searchAfterDebounce(m.searchSeq))
+}
+
 // active returns the list for the current step. Pointer receiver so the
 // returned pointer aims at the caller's model, not a copy.
 func (m *uiModel) active() *list.Model {
@@ -519,7 +677,51 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h, v := docStyle.GetFrameSize()
 		m.picker.SetSize(msg.Width-h, msg.Height-v-reservedRows)
 		m.tplPicker.SetSize(msg.Width-h, msg.Height-v-reservedRows)
+	case searchTickMsg:
+		// debounce elapsed with nothing typed since — start the batch chain
+		if m.searchMode && msg.seq == m.searchSeq {
+			if term := strings.TrimSpace(m.search.Value()); len(term) >= searchMinChars {
+				m.searchHits = nil
+				return m, runFileSearch(m.searchDirs, term, m.searchSeq, 0)
+			}
+		}
+		return m, nil
+	case searchBatchMsg:
+		if !m.searchMode || msg.seq != m.searchSeq {
+			return m, nil // stale: the term changed — also ends the chain
+		}
+		if msg.err != nil {
+			// hard failure (rg missing, bad invocation) — retrying the
+			// remaining batches would fail the same way, so stop here
+			m.picker.SetItems(m.searchItems(m.searchHits, msg.err.Error()))
+			return m, nil
+		}
+		first := len(m.searchHits) == 0 && len(msg.hits) > 0
+		m.searchHits = append(m.searchHits, msg.hits...)
+		done := msg.next >= len(m.searchDirs)
+		hint := ""
+		switch {
+		case !done:
+			hint = fmt.Sprintf("searching… %d/%d projects", msg.next, len(m.searchDirs))
+		case len(m.searchHits) == 0:
+			hint = "no matching files"
+		}
+		m.picker.SetItems(m.searchItems(m.searchHits, hint))
+		if first {
+			// don't touch the cursor on later batches — the user may
+			// already be moving through the streamed-in results
+			m.picker.Select(0)
+			skipHeader(&m.picker, true)
+		}
+		if done {
+			return m, nil
+		}
+		return m, runFileSearch(m.searchDirs, strings.TrimSpace(m.search.Value()), m.searchSeq, msg.next)
 	case tea.KeyMsg:
+		// file-search mode owns every key while it is on
+		if m.searchMode && m.step == 0 {
+			return m.updateSearch(msg)
+		}
 		filtering := m.active().FilterState() == list.Filtering
 		switch msg.String() {
 		case "ctrl+c":
@@ -528,6 +730,15 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// while typing, "q" is filter text, not a quit
 			if !filtering {
 				return m, tea.Quit
+			}
+		case "f":
+			// like "a": a command only while not filtering, otherwise text
+			if m.step == 0 && m.picker.FilterState() == list.Unfiltered {
+				m.searchMode = true
+				m.search.SetValue("")
+				m.search.Focus()
+				m.picker.SetItems(m.searchItems(nil, "type to search file names and content"))
+				return m, nil
 			}
 		case "a":
 			// toggle between the recent-only and the full project list
@@ -572,18 +783,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selTemplate = it.name
 				return m, tea.Quit
 			case kindProject:
-				m.selDir = it.dir
-				switch items := m.tplPicker.Items(); len(items) {
-				case 0:
-					m.err = fmt.Errorf("no template without a fixed dir configured")
-					return m, tea.Quit
-				case 1: // nothing to choose — apply the only candidate
-					m.selTemplate = items[0].(pickItem).name
-					return m, tea.Quit
-				}
-				m.tplPicker.Title = "template for " + it.name
-				m.step = 1
-				return m, nil
+				return m.selectProject(it)
 			case kindTemplateChoice:
 				m.selTemplate = it.name
 				return m, tea.Quit
@@ -643,9 +843,12 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // while browsing, and the live "Filter" input (label + typed text + cursor)
 // once filtering has started.
 func (m uiModel) filterLine() string {
+	if m.searchMode && m.step == 0 {
+		return m.search.View()
+	}
 	l := m.active()
 	if l.FilterState() == list.Unfiltered {
-		return filterPromptStyle.Render("Filter: ") + detailStyle.Render("press / to filter")
+		return filterPromptStyle.Render("Filter: ") + detailStyle.Render("/ filter · f file search")
 	}
 	return l.FilterInput.View()
 }
