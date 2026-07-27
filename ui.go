@@ -38,17 +38,20 @@ const (
 	kindHeader itemKind = iota // non-selectable section separator
 	kindWorkspace
 	kindTemplate // template with a fixed dir
+	kindWindow   // an already-open tmux window to jump to
 	kindProject
 	kindTemplateChoice // step 2: template for a chosen project
 	kindHint           // non-selectable dim note, e.g. "N older projects hidden"
 )
 
 type pickItem struct {
-	kind   itemKind
-	name   string
-	detail string // path or summary
-	age    string // relative last-activity time (kindProject), display only
-	dir    string // project path (kindProject)
+	kind    itemKind
+	name    string
+	detail  string // path or summary
+	age     string // relative last-activity time (kindProject), display only
+	dir     string // project/window path (kindProject, kindWindow, kindTemplate)
+	winID   string // tmux window id (kindWindow)
+	session string // tmux session the window is in (kindWindow)
 }
 
 // detailText is the dim right-hand part of the row: detail plus the
@@ -70,6 +73,8 @@ func (i pickItem) label() string {
 		return "⊞ " + i.name
 	case kindTemplate:
 		return "⊡ " + i.name
+	case kindWindow:
+		return "▣ " + i.name
 	default:
 		return i.name
 	}
@@ -217,6 +222,8 @@ type uiModel struct {
 	selWorkspace string
 	selTemplate  string
 	selDir       string
+	selWindow    pickItem // a chosen open window to jump to (kind == kindWindow)
+	copyPath     string   // "c" pressed: copy this path instead of opening
 	err          error
 }
 
@@ -244,8 +251,23 @@ func newUIModel(cfg *Config) uiModel {
 				kind:   kindTemplate,
 				name:   name,
 				detail: tilde(expandHome(dir)),
+				dir:    expandHome(dir),
 			})
 		}
+	}
+
+	// already-open tmux windows, offered so a project that is already up can
+	// be jumped to rather than opened a second time
+	var windows []list.Item
+	for _, w := range listWindows() {
+		windows = append(windows, pickItem{
+			kind:    kindWindow,
+			name:    w.name,
+			detail:  tilde(w.path),
+			dir:     w.path,
+			winID:   w.id,
+			session: w.session,
+		})
 	}
 	seen := map[string]bool{}
 	type projEntry struct {
@@ -331,6 +353,7 @@ func newUIModel(cfg *Config) uiModel {
 		}
 		addGroup("WORKSPACES", workspaces)
 		addGroup("TEMPLATES", templates)
+		addGroup("OPEN WINDOWS", windows)
 		for _, g := range groups {
 			addGroup(g.title, g.items)
 		}
@@ -373,6 +396,7 @@ func newUIModel(cfg *Config) uiModel {
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all projects")),
 			key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "file search")),
+			key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy path")),
 		}
 	}
 	// We draw the title and filter on our own lines above the list, so the
@@ -731,6 +755,15 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !filtering {
 				return m, tea.Quit
 			}
+		case "c":
+			// copy the selected path instead of opening; like "q", a command
+			// only when not actively typing a filter, otherwise it is text
+			if !filtering {
+				if it, ok := m.active().SelectedItem().(pickItem); ok && it.dir != "" {
+					m.copyPath = it.dir
+					return m, tea.Quit
+				}
+			}
 		case "f":
 			// like "a": a command only while not filtering, otherwise text
 			if m.step == 0 && m.picker.FilterState() == list.Unfiltered {
@@ -781,6 +814,9 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			case kindTemplate:
 				m.selTemplate = it.name
+				return m, tea.Quit
+			case kindWindow:
+				m.selWindow = it
 				return m, tea.Quit
 			case kindProject:
 				return m.selectProject(it)
@@ -888,6 +924,29 @@ func cmdUI(cfg *Config, args []string) {
 	}
 
 	switch {
+	case m.copyPath != "":
+		if err := copyToClipboard(m.copyPath); err != nil {
+			fatal(err)
+		}
+		if insideTmux() {
+			// a popup closes on exit, so a printed line would vanish — show
+			// the confirmation on the client's status line instead
+			tmux("display-message", "--", "tmuxctl: copied "+m.copyPath)
+		} else {
+			fmt.Printf("copied %s\n", m.copyPath)
+		}
+		return
+	case m.selWindow.winID != "":
+		// the invoking session is the -s flag if given, else the one in $TMUX
+		// (the popup binding passes no -s) — needed to move the right client
+		inv := *session
+		if inv == "" {
+			inv = currentSessionTarget()
+		}
+		if err := jumpToWindow(inv, m.selWindow.session, m.selWindow.winID); err != nil {
+			fatal(err)
+		}
+		return
 	case m.selWorkspace != "":
 		if err := applyWorkspace(cfg, m.selWorkspace, *session, *bg); err != nil {
 			fatal(err)

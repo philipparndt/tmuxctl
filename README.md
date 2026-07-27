@@ -23,8 +23,11 @@ tmuxctl workspaces                # list configured workspaces
 ```
 
 `tmuxctl ui` opens a small TUI (Bubble Tea): one compact, filterable list
-grouped into labeled sections — workspaces (⊞), fixed-dir templates (⊡), and
-the projects below `dev_dirs`.
+grouped into labeled sections — workspaces (⊞), fixed-dir templates (⊡),
+already-open tmux windows (▣), and the projects below `dev_dirs`.
+Open windows are listed just above the projects and searched alongside them,
+so a project that is already up can be *jumped to* — picking one selects that
+window (switching sessions if needed) instead of opening a second copy.
 A project is a repository root (a `.git` is present) — grouping folders and
 repos nested inside other repos are not listed, and the search never
 descends into a repository. Initially only *recent* projects are shown —
@@ -39,6 +42,8 @@ Type `/` to filter, enter to apply — picking a
 project asks for the template in a second step, offering only templates
 without a fixed dir (the default template preselected); if just one
 qualifies it is applied directly without asking. Esc goes back, q quits.
+`c` copies the highlighted project's (or open window's) path to the clipboard
+and exits — handy when you just want the path, not a window.
 
 `f` searches projects *by their files* — file names and file content —
 for when you remember a config file or a code snippet but not which project

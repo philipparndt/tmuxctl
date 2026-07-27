@@ -21,6 +21,99 @@ func insideTmux() bool {
 	return os.Getenv("TMUX") != ""
 }
 
+// openWindow is one currently-open tmux window across all sessions, used to
+// offer "jump to the window that is already open" instead of creating a new
+// one. path is the active pane's working directory — a good proxy for the
+// project the window belongs to.
+type openWindow struct {
+	id      string // window id, e.g. "@7" (unique across sessions)
+	session string
+	name    string
+	path    string
+}
+
+// listWindows returns every open window across all sessions, or nil when not
+// running inside a tmux server. Errors are non-fatal: the picker simply omits
+// the section.
+func listWindows() []openWindow {
+	if !insideTmux() {
+		return nil
+	}
+	out, err := tmux("list-windows", "-a", "-F",
+		"#{session_name}\t#{window_id}\t#{window_name}\t#{pane_current_path}")
+	if err != nil {
+		return nil
+	}
+	return parseWindows(out)
+}
+
+// parseWindows turns tab-separated `list-windows` output into openWindows.
+func parseWindows(out string) []openWindow {
+	var wins []openWindow
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		f := strings.SplitN(line, "\t", 4)
+		if len(f) < 4 {
+			continue
+		}
+		wins = append(wins, openWindow{session: f[0], id: f[1], name: f[2], path: f[3]})
+	}
+	return wins
+}
+
+// clientForSession returns the name of a client attached to session, or "".
+// A display-popup runs without a pane context, so switch-client needs the
+// invoking session's client named explicitly to move the right client.
+func clientForSession(session string) string {
+	if session == "" {
+		return ""
+	}
+	out, err := tmux("list-clients", "-t", session, "-F", "#{client_name}")
+	if err != nil || out == "" {
+		return ""
+	}
+	return strings.SplitN(out, "\n", 2)[0]
+}
+
+// jumpToWindow makes the invoking client show an already-open window: select
+// it within its own session, then switch the client to that session. The two
+// steps together move the client even across sessions, and work from a popup
+// (no pane context) by naming the client explicitly.
+func jumpToWindow(invokingSession, targetSession, windowID string) error {
+	if _, err := tmux("select-window", "-t", windowID); err != nil {
+		return err
+	}
+	args := []string{"switch-client", "-t", targetSession}
+	if c := clientForSession(invokingSession); c != "" {
+		args = []string{"switch-client", "-c", c, "-t", targetSession}
+	}
+	_, err := tmux(args...)
+	return err
+}
+
+// copyToClipboard puts s on the system clipboard (pbcopy on macOS), always
+// also stashing it in the tmux paste buffer so it is available even without a
+// system clipboard tool.
+func copyToClipboard(s string) error {
+	if path, err := exec.LookPath("pbcopy"); err == nil {
+		cmd := exec.Command(path)
+		cmd.Stdin = strings.NewReader(s)
+		if err := cmd.Run(); err == nil {
+			if insideTmux() {
+				tmux("set-buffer", "--", s)
+			}
+			return nil
+		}
+	}
+	if insideTmux() {
+		_, err := tmux("set-buffer", "--", s)
+		return err
+	}
+	return fmt.Errorf("no clipboard available (pbcopy not found, not inside tmux)")
+}
+
 // currentSessionTarget returns a target for the session tmuxctl was invoked
 // from, read from the session id in $TMUX ("socket,pid,session-id").
 //
