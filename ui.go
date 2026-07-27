@@ -322,7 +322,7 @@ func newUIModel(cfg *Config) uiModel {
 	if len(recent) > 0 {
 		hint := ""
 		if hidden := len(allProjects) - len(recent); hidden > 0 {
-			hint = fmt.Sprintf("… %d older — a: show all · /: search all", hidden)
+			hint = fmt.Sprintf("… %d older — type to search all", hidden)
 		}
 		itemsRecent = buildItems(recentGroups, hint)
 	}
@@ -356,7 +356,9 @@ func newUIModel(cfg *Config) uiModel {
 	picker.SetShowFilter(false)
 	picker.Filter = activityRankedFilter(activity)
 	styleFilter(&picker)
-	skipHeader(&picker, true)
+	// The picker opens already in filter mode — typing narrows immediately,
+	// no "/" needed. An empty filter still shows the recent-projects view.
+	focusFilter(&picker)
 
 	tplPicker := list.New(tplItems, compactDelegate{}, 0, 0)
 	tplPicker.Title = "template"
@@ -451,6 +453,55 @@ func skipHeader(l *list.Model, down bool) {
 	}
 }
 
+// focusFilter opens the list already in filter mode with an empty query, so
+// the user can type straight away without first pressing "/". An empty filter
+// shows every current item (section headers included), so the initial view is
+// the same recent-projects list — just ready to receive typing.
+func focusFilter(l *list.Model) {
+	l.SetFilterText("")
+	l.SetFilterState(list.Filtering)
+	l.Select(0)
+	skipHeader(l, true)
+}
+
+// leaveFilter moves from typing into navigating the results: a non-empty query
+// stays applied (the narrowed list is kept and becomes browsable), an empty one
+// drops back to the plain unfiltered view.
+func leaveFilter(l *list.Model) {
+	if l.FilterInput.Value() == "" {
+		l.ResetFilter()
+		return
+	}
+	l.SetFilterState(list.FilterApplied)
+}
+
+// reapplyFilter swaps the backing item set while preserving the live query and
+// filter state, recomputing matches synchronously so the view never blanks.
+func reapplyFilter(l *list.Model, items []list.Item) {
+	state := l.FilterState()
+	val := l.FilterInput.Value()
+	l.SetItems(items)
+	if state != list.Unfiltered {
+		l.SetFilterText(val)    // recompute matches over the new items
+		l.SetFilterState(state) // SetFilterText leaves FilterApplied; restore
+	}
+	l.Select(0)
+}
+
+// clearFilter leaves filter mode entirely: the query is dropped and the picker
+// returns to the recent-projects view (or the full list when "show all" is on).
+func (m *uiModel) clearFilter() {
+	m.picker.ResetFilter()
+	m.expanded = false
+	items := m.itemsRecent
+	if m.showAll {
+		items = m.itemsAll
+	}
+	m.picker.SetItems(items)
+	m.picker.Select(0)
+	skipHeader(&m.picker, true)
+}
+
 func (m uiModel) Init() tea.Cmd { return nil }
 
 // active returns the list for the current step. Pointer receiver so the
@@ -469,12 +520,15 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.picker.SetSize(msg.Width-h, msg.Height-v-reservedRows)
 		m.tplPicker.SetSize(msg.Width-h, msg.Height-v-reservedRows)
 	case tea.KeyMsg:
-		if m.active().FilterState() == list.Filtering {
-			break
-		}
+		filtering := m.active().FilterState() == list.Filtering
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			return m, tea.Quit
+		case "q":
+			// while typing, "q" is filter text, not a quit
+			if !filtering {
+				return m, tea.Quit
+			}
 		case "a":
 			// toggle between the recent-only and the full project list
 			if m.step == 0 && m.picker.FilterState() == list.Unfiltered {
@@ -488,16 +542,20 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				skipHeader(&m.picker, true)
 				return m, nil
 			}
-		case "/":
-			// filtering must search all projects, not just the recent view;
-			// swap the full set in before the list starts the filter below
-			if m.step == 0 && !m.showAll {
-				m.picker.SetItems(m.itemsAll)
-				m.expanded = true
+		case "down", "up", "pgdown", "pgup", "ctrl+n", "ctrl+p":
+			// leave the filter and let the same keystroke move the selection,
+			// so one press both exits and moves (not two)
+			if filtering {
+				leaveFilter(m.active())
 			}
 		case "esc":
 			if m.step == 1 {
 				m.step = 0
+				return m, nil
+			}
+			// step 0: the first esc leaves the filter, a second one quits
+			if m.picker.FilterState() != list.Unfiltered {
+				m.clearFilter()
 				return m, nil
 			}
 			return m, tea.Quit
@@ -535,13 +593,28 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	al := m.active()
 	var cmd tea.Cmd
 	*al, cmd = al.Update(msg)
-	// The filter session is over (cancelled or cleared) — back to the
-	// recent-only view it replaced.
-	if m.expanded && !m.showAll && m.picker.FilterState() == list.Unfiltered {
-		m.expanded = false
-		m.picker.SetItems(m.itemsRecent)
-		m.picker.Select(0)
+
+	// Keep the backing set in step with the filter: a live query searches every
+	// project, while an empty query (browsing, or just cleared) shows the
+	// curated recent view. Skipped when "a" has pinned the full list.
+	//
+	// reapplyFilter recomputes matches synchronously, so the async filter cmd
+	// the list just queued over the *old* items is stale — drop it, or the
+	// FilterMatchesMsg it produces would clobber the freshly swapped results.
+	if m.step == 0 && !m.showAll {
+		typed := m.picker.FilterState() != list.Unfiltered && m.picker.FilterInput.Value() != ""
+		switch {
+		case typed && !m.expanded:
+			m.expanded = true
+			reapplyFilter(&m.picker, m.itemsAll)
+			cmd = nil
+		case !typed && m.expanded:
+			m.expanded = false
+			reapplyFilter(&m.picker, m.itemsRecent)
+			cmd = nil
+		}
 	}
+
 	// Keep the cursor off non-selectable section headers.
 	//
 	// While filtering, headers drop out of the results (empty FilterValue)
