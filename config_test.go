@@ -1,6 +1,27 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+// The shipped default is written verbatim on first run, so a YAML slip in it
+// would only surface as a parse error on a fresh install.
+func TestDefaultConfigParses(t *testing.T) {
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(defaultConfig), &cfg); err != nil {
+		t.Fatalf("defaultConfig: %v", err)
+	}
+	dev, ok := cfg.Templates[cfg.DefaultTemplate]
+	if !ok {
+		t.Fatalf("default template %q missing", cfg.DefaultTemplate)
+	}
+	c := dev.Panes[0].Claude
+	if c == nil || c.Mode != "auto" {
+		t.Errorf("first pane: got %+v, want a claude pane in auto mode", dev.Panes[0])
+	}
+}
 
 func TestClaudePaneCommand(t *testing.T) {
 	tests := []struct {

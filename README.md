@@ -23,8 +23,11 @@ tmuxctl workspaces                # list configured workspaces
 ```
 
 `tmuxctl ui` opens a small TUI (Bubble Tea): one compact, filterable list
-grouped into labeled sections — workspaces (⊞), fixed-dir templates (⊡),
-already-open tmux windows (▣), and the projects below `dev_dirs`.
+grouped into labeled sections — workspaces (`ws`), fixed-dir templates
+(`tpl`), already-open tmux windows (`win`), and the projects below `dev_dirs`
+(`prj`). Every row carries its type as a colored tag in the left column, so
+the kinds stay distinguishable while filtering, where the section headers
+drop out of the results.
 Open windows are listed just above the projects and searched alongside them,
 so a project that is already up can be *jumped to* — picking one selects that
 window (switching sessions if needed) instead of opening a second copy.
@@ -107,7 +110,8 @@ templates:
   dev:
     trim_prefix: ["acme-"]   # window title: folder name without this prefix
     panes:
-      - run: claude   # left: claude code in the project folder
+      - claude:       # left: claude code in the project folder
+          mode: auto  # --permission-mode auto
       - run: ""       # right: plain shell in the project folder
         split: right
         size: 50%

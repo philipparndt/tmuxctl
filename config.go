@@ -207,7 +207,8 @@ templates:
   dev:
     trim_prefix: ["acme-"]   # window title: folder name without this prefix
     panes:
-      - run: claude   # left: claude code in the project folder
+      - claude:       # left: claude code in the project folder
+          mode: auto  # --permission-mode auto
       - run: ""       # right: plain shell in the project folder
         split: right
         size: 50%
@@ -232,7 +233,8 @@ templates:
 #       - name: system tests          # ... or define the window inline
 #         dir: ~/dev/acme/acme-test
 #         panes:
-#           - run: claude
+#           - claude:
+#               mode: auto
 `
 
 func configPath() (string, error) {

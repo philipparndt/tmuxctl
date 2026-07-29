@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestBucket(t *testing.T) {
@@ -28,6 +30,33 @@ func TestBucket(t *testing.T) {
 	for _, tt := range tests {
 		if got := bucket(tt.t, now); got != tt.want {
 			t.Errorf("bucket(%v): got %q, want %q", tt.t, got, tt.want)
+		}
+	}
+}
+
+// Every selectable kind needs a tag: filtered results have no section
+// headers, so the tag is the only thing left that names the row's type.
+func TestTagPerSelectableKind(t *testing.T) {
+	kinds := map[itemKind]string{
+		kindWorkspace:      "ws",
+		kindTemplate:       "tpl",
+		kindTemplateChoice: "tpl",
+		kindWindow:         "win",
+		kindProject:        "prj",
+	}
+	for kind, want := range kinds {
+		it := pickItem{kind: kind, name: "x"}
+		if got := it.tag(); got != want {
+			t.Errorf("kind %d: tag %q, want %q", kind, got, want)
+		}
+		// names must line up across kinds, so every column is tagWidth wide
+		if got := lipgloss.Width(it.tagColumn()); got != tagWidth {
+			t.Errorf("kind %d: tagColumn width %d, want %d", kind, got, tagWidth)
+		}
+	}
+	for _, kind := range []itemKind{kindHeader, kindHint} {
+		if got := (pickItem{kind: kind}).tag(); got != "" {
+			t.Errorf("kind %d: tag %q, want empty", kind, got)
 		}
 	}
 }

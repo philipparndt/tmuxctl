@@ -67,17 +67,42 @@ func (i pickItem) detailText() string {
 	return i.detail
 }
 
-func (i pickItem) label() string {
+// tagWidth is the width of the type-tag column, wide enough for the longest
+// tag plus a separating space.
+const tagWidth = 4
+
+var tagStyles = map[itemKind]lipgloss.Style{
+	kindWorkspace:      lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Width(tagWidth),
+	kindTemplate:       lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Width(tagWidth),
+	kindTemplateChoice: lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Width(tagWidth),
+	kindWindow:         lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Width(tagWidth),
+	kindProject:        lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Width(tagWidth),
+}
+
+// tag is the short type name shown in the row's left column. Filtering drops
+// the section headers, so this tag is what still tells a template, an open
+// window and a project apart — all three of which show only a path otherwise.
+func (i pickItem) tag() string {
 	switch i.kind {
 	case kindWorkspace:
-		return "⊞ " + i.name
-	case kindTemplate:
-		return "⊡ " + i.name
+		return "ws"
+	case kindTemplate, kindTemplateChoice:
+		return "tpl"
 	case kindWindow:
-		return "▣ " + i.name
-	default:
-		return i.name
+		return "win"
+	case kindProject:
+		return "prj"
 	}
+	return ""
+}
+
+// tagColumn renders the tag padded to tagWidth, so names line up across kinds.
+func (i pickItem) tagColumn() string {
+	t := i.tag()
+	if t == "" {
+		return strings.Repeat(" ", tagWidth)
+	}
+	return tagStyles[i.kind].Render(t)
 }
 
 func (i pickItem) selectable() bool {
@@ -173,22 +198,18 @@ func (compactDelegate) Render(w io.Writer, m list.Model, index int, it list.Item
 		return
 	}
 	if p.kind == kindHint {
-		fmt.Fprint(w, "  "+detailStyle.Render(p.name))
+		fmt.Fprint(w, "  "+strings.Repeat(" ", tagWidth)+detailStyle.Render(p.name))
 		return
 	}
-	detail := p.detailText()
+	cursor, name := "  ", p.name
 	if index == m.Index() {
-		fmt.Fprint(w, selStyle.Render("▸ "+p.label()))
-		if detail != "" {
-			fmt.Fprint(w, "  "+detailStyle.Render(detail))
-		}
-		return
+		cursor, name = selStyle.Render("▸ "), selStyle.Render(p.name)
 	}
-	line := p.label()
-	if detail != "" {
+	line := cursor + p.tagColumn() + name
+	if detail := p.detailText(); detail != "" {
 		line += "  " + detailStyle.Render(detail)
 	}
-	fmt.Fprint(w, "  "+line)
+	fmt.Fprint(w, line)
 }
 
 // uiModel is a two-step picker: choose a workspace/template/project, and for
