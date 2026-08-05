@@ -59,6 +59,15 @@ matching file as evidence (`(content)` marks a content match, `+N` more
 matching files). Nothing of this runs outside `f` mode — the normal picker
 is untouched.
 
+In a popup 20 rows or shorter the picker drops its chrome: no margins, no
+blank lines, the title moves onto the filter row, the section headers
+(`TEMPLATES`, `TODAY`, …) and the help footer go away, and rows are clipped
+instead of wrapped. Nothing is lost with the headers — the tag column already
+names each row's type and the age column says what the time sections did —
+and the keys from the help line are named next to the filter instead. A
+12-row popup shows eleven projects that way instead of four. The switch is
+live: resizing the terminal re-chromes the picker in either direction.
+
 Bind it to a tmux popup with:
 
 ```sh

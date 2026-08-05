@@ -18,8 +18,11 @@ import (
 )
 
 var (
-	docStyle    = lipgloss.NewStyle().Margin(1, 2)
-	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	docStyle = lipgloss.NewStyle().Margin(1, 2)
+	// compactDocStyle keeps a single column of side padding and no vertical
+	// margin: on a short screen every row has to earn its place.
+	compactDocStyle = lipgloss.NewStyle().Margin(0, 1)
+	headerStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
 	selStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
 	detailStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	titleStyle  = lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("230")).Bold(true).Padding(0, 1)
@@ -27,10 +30,50 @@ var (
 	filterPromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
 )
 
-// reservedRows is the height of the header we render above the list ourselves
-// (title, a blank line, the filter line, and a blank separator). The list's
-// own size must be reduced by this much or the combined view overflows.
-const reservedRows = 4
+// chrome is the set of decorations drawn around the list. A tmux popup can be
+// barely a dozen rows tall, and the full chrome — the document margin, the
+// title on its own line with blank lines around the filter, the section
+// headers with their spacers, and the list's pagination and help footer —
+// costs ten or more of them. On a short screen that is most of the window, so
+// all of it goes and only the filter line survives, sharing its row with the
+// title.
+type chrome struct {
+	margin  bool // vertical document margin
+	title   bool // title on its own line, blank lines around the filter
+	headers bool // section headers and the blank rows between sections
+	footer  bool // the list's pagination dots and help line
+}
+
+var fullChrome = chrome{margin: true, title: true, headers: true, footer: true}
+
+// compactHeight is the terminal height at or below which the picker gives up
+// its chrome. Above it the full layout still leaves a comfortable list.
+const compactHeight = 20
+
+func chromeFor(height int) chrome {
+	if height <= compactHeight {
+		return chrome{}
+	}
+	return fullChrome
+}
+
+// reservedRows is the height of the header View draws above the list itself:
+// title · blank · filter · blank separator when full, just the combined
+// title+filter line when compact. The list's own size must be reduced by this
+// much or the combined view overflows.
+func (c chrome) reservedRows() int {
+	if c.title {
+		return 4
+	}
+	return 1
+}
+
+func (c chrome) doc() lipgloss.Style {
+	if c.margin {
+		return docStyle
+	}
+	return compactDocStyle
+}
 
 type itemKind int
 
@@ -194,11 +237,11 @@ func (compactDelegate) Render(w io.Writer, m list.Model, index int, it list.Item
 		return
 	}
 	if p.kind == kindHeader {
-		fmt.Fprint(w, headerStyle.Render(p.name))
+		fmt.Fprint(w, clip(headerStyle.Render(p.name), m.Width()))
 		return
 	}
 	if p.kind == kindHint {
-		fmt.Fprint(w, "  "+strings.Repeat(" ", tagWidth)+detailStyle.Render(p.name))
+		fmt.Fprint(w, clip("  "+strings.Repeat(" ", tagWidth)+detailStyle.Render(p.name), m.Width()))
 		return
 	}
 	cursor, name := "  ", p.name
@@ -209,7 +252,17 @@ func (compactDelegate) Render(w io.Writer, m list.Model, index int, it list.Item
 	if detail := p.detailText(); detail != "" {
 		line += "  " + detailStyle.Render(detail)
 	}
-	fmt.Fprint(w, line)
+	fmt.Fprint(w, clip(line, m.Width()))
+}
+
+// clip cuts a rendered line to the available width. A row that wraps would
+// cost a second screen row, which the list's height math does not account for
+// — the view then overflows and scrolls its own header off the top.
+func clip(line string, width int) string {
+	if width <= 0 {
+		return line
+	}
+	return lipgloss.NewStyle().MaxWidth(width).Render(line)
 }
 
 // uiModel is a two-step picker: choose a workspace/template/project, and for
@@ -220,11 +273,20 @@ type uiModel struct {
 	tplPicker list.Model
 	step      int
 
+	// chrome tracks how much decoration the current terminal height affords,
+	// width the room left for the header line after the document margin.
+	chrome chrome
+	width  int
+
 	// The picker initially shows only recently active projects
 	// (itemsRecent); "a" toggles the full list, and starting a filter
 	// swaps in itemsAll so the search always covers every project.
+	// The dense* variants are the same sets without the blank spacer rows,
+	// used by the compact chrome.
 	itemsRecent []list.Item
 	itemsAll    []list.Item
+	denseRecent []list.Item
+	denseAll    []list.Item
 	showAll     bool // "a" pressed: keep the full list
 	expanded    bool // itemsAll swapped in for a running filter
 
@@ -238,6 +300,7 @@ type uiModel struct {
 	searchDirs []string            // project roots, most recently used first
 	searchInfo map[string]pickItem // base project item per root, for result rows
 	searchHits []fileHit           // results streamed in so far, MRU order
+	searchHint string              // dim note below the results, kept for redraws
 
 	// result, evaluated after the program quits
 	selWorkspace string
@@ -444,9 +507,80 @@ func newUIModel(cfg *Config) uiModel {
 	search.TextStyle = lipgloss.NewStyle().Bold(true)
 	search.Cursor.SetMode(cursor.CursorStatic)
 
-	return uiModel{cfg: cfg, picker: picker, tplPicker: tplPicker,
+	return uiModel{cfg: cfg, picker: picker, tplPicker: tplPicker, chrome: fullChrome,
 		itemsRecent: itemsRecent, itemsAll: itemsAll,
+		denseRecent: dense(itemsRecent), denseAll: dense(itemsAll),
 		search: search, searchDirs: searchDirs, searchInfo: searchInfo}
+}
+
+// dense drops the section headers and the blank rows between sections. On a
+// short screen they cost more than they carry: the tag column already names
+// each row's type, and a project's age column says what its time section does.
+// Hints stay — they say something no row repeats.
+func dense(items []list.Item) []list.Item {
+	out := make([]list.Item, 0, len(items))
+	for _, it := range items {
+		if p, ok := it.(pickItem); ok && p.kind == kindHeader {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
+// recentItems, allItems and browseItems return the item set for the current
+// chrome: browseItems is what the picker shows while not filtering — the
+// recent view by default, the full list once "a" is on.
+func (m uiModel) recentItems() []list.Item {
+	if m.chrome.headers {
+		return m.itemsRecent
+	}
+	return m.denseRecent
+}
+
+func (m uiModel) allItems() []list.Item {
+	if m.chrome.headers {
+		return m.itemsAll
+	}
+	return m.denseAll
+}
+
+func (m uiModel) browseItems() []list.Item {
+	if m.showAll {
+		return m.allItems()
+	}
+	return m.recentItems()
+}
+
+// setLayout re-chromes the picker for the terminal's size and gives both lists
+// what is left after the header View draws itself.
+func (m *uiModel) setLayout(width, height int) {
+	if c := chromeFor(height); c != m.chrome {
+		headers := m.chrome.headers
+		m.chrome = c
+		m.picker.SetShowHelp(c.footer)
+		m.picker.SetShowPagination(c.footer)
+		m.tplPicker.SetShowHelp(c.footer)
+		m.tplPicker.SetShowPagination(c.footer)
+		// Header and spacer rows are part of the backing item set, so a
+		// density change has to swap it — keeping any running filter applied.
+		if headers != c.headers {
+			if m.searchMode {
+				m.picker.SetItems(m.searchItems(m.searchHits, m.searchHint))
+			} else {
+				items := m.browseItems()
+				if m.expanded {
+					items = m.allItems()
+				}
+				reapplyFilter(&m.picker, items)
+			}
+			skipHeader(&m.picker, true)
+		}
+	}
+	h, v := m.chrome.doc().GetFrameSize()
+	m.width = width - h
+	m.picker.SetSize(m.width, height-v-m.chrome.reservedRows())
+	m.tplPicker.SetSize(m.width, height-v-m.chrome.reservedRows())
 }
 
 // activityRankedFilter orders filter matches by the projects' last activity,
@@ -530,7 +664,10 @@ func runFileSearch(dirs []string, term string, seq, from int) tea.Cmd {
 // the hits' (most recently used first) order, the matched file as evidence
 // in the detail column, and a dim hint while there is nothing to show.
 func (m uiModel) searchItems(hits []fileHit, hint string) []list.Item {
-	items := []list.Item{header("FILE MATCHES")}
+	var items []list.Item
+	if m.chrome.headers {
+		items = append(items, header("FILE MATCHES"))
+	}
 	for _, h := range hits {
 		it, ok := m.searchInfo[h.dir]
 		if !ok {
@@ -550,6 +687,13 @@ func (m uiModel) searchItems(hits []fileHit, hint string) []list.Item {
 		items = append(items, pickItem{kind: kindHint, name: hint})
 	}
 	return items
+}
+
+// setSearchItems shows the results collected so far under a hint, remembering
+// the hint so a resize can redraw the same state.
+func (m *uiModel) setSearchItems(hint string) {
+	m.searchHint = hint
+	m.picker.SetItems(m.searchItems(m.searchHits, hint))
 }
 
 // styleFilter makes entering filter mode obvious: a yellow "Filter: " label
@@ -631,11 +775,7 @@ func reapplyFilter(l *list.Model, items []list.Item) {
 func (m *uiModel) clearFilter() {
 	m.picker.ResetFilter()
 	m.expanded = false
-	items := m.itemsRecent
-	if m.showAll {
-		items = m.itemsAll
-	}
-	m.picker.SetItems(items)
+	m.picker.SetItems(m.browseItems())
 	m.picker.Select(0)
 	skipHeader(&m.picker, true)
 }
@@ -669,11 +809,7 @@ func (m uiModel) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.searchMode = false
 		m.search.Blur()
-		items := m.itemsRecent
-		if m.showAll {
-			items = m.itemsAll
-		}
-		m.picker.SetItems(items)
+		m.picker.SetItems(m.browseItems())
 		m.picker.Select(0)
 		skipHeader(&m.picker, true)
 		return m, nil
@@ -700,10 +836,10 @@ func (m uiModel) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.searchSeq++
 	m.searchHits = nil
 	if len(strings.TrimSpace(m.search.Value())) < searchMinChars {
-		m.picker.SetItems(m.searchItems(nil, "type to search file names and content"))
+		m.setSearchItems("type to search file names and content")
 		return m, cmd
 	}
-	m.picker.SetItems(m.searchItems(nil, "searching…"))
+	m.setSearchItems("searching…")
 	return m, tea.Batch(cmd, searchAfterDebounce(m.searchSeq))
 }
 
@@ -719,9 +855,7 @@ func (m *uiModel) active() *list.Model {
 func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		h, v := docStyle.GetFrameSize()
-		m.picker.SetSize(msg.Width-h, msg.Height-v-reservedRows)
-		m.tplPicker.SetSize(msg.Width-h, msg.Height-v-reservedRows)
+		m.setLayout(msg.Width, msg.Height)
 	case searchTickMsg:
 		// debounce elapsed with nothing typed since — start the batch chain
 		if m.searchMode && msg.seq == m.searchSeq {
@@ -738,7 +872,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			// hard failure (rg missing, bad invocation) — retrying the
 			// remaining batches would fail the same way, so stop here
-			m.picker.SetItems(m.searchItems(m.searchHits, msg.err.Error()))
+			m.setSearchItems(msg.err.Error())
 			return m, nil
 		}
 		first := len(m.searchHits) == 0 && len(msg.hits) > 0
@@ -751,7 +885,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case len(m.searchHits) == 0:
 			hint = "no matching files"
 		}
-		m.picker.SetItems(m.searchItems(m.searchHits, hint))
+		m.setSearchItems(hint)
 		if first {
 			// don't touch the cursor on later batches — the user may
 			// already be moving through the streamed-in results
@@ -791,18 +925,15 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchMode = true
 				m.search.SetValue("")
 				m.search.Focus()
-				m.picker.SetItems(m.searchItems(nil, "type to search file names and content"))
+				m.searchHits = nil
+				m.setSearchItems("type to search file names and content")
 				return m, nil
 			}
 		case "a":
 			// toggle between the recent-only and the full project list
 			if m.step == 0 && m.picker.FilterState() == list.Unfiltered {
 				m.showAll = !m.showAll
-				items := m.itemsRecent
-				if m.showAll {
-					items = m.itemsAll
-				}
-				m.picker.SetItems(items)
+				m.picker.SetItems(m.browseItems())
 				m.picker.Select(0)
 				skipHeader(&m.picker, true)
 				return m, nil
@@ -863,11 +994,11 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case typed && !m.expanded:
 			m.expanded = true
-			reapplyFilter(&m.picker, m.itemsAll)
+			reapplyFilter(&m.picker, m.allItems())
 			cmd = nil
 		case !typed && m.expanded:
 			m.expanded = false
-			reapplyFilter(&m.picker, m.itemsRecent)
+			reapplyFilter(&m.picker, m.recentItems())
 			cmd = nil
 		}
 	}
@@ -905,20 +1036,26 @@ func (m uiModel) filterLine() string {
 	}
 	l := m.active()
 	if l.FilterState() == list.Unfiltered {
-		return filterPromptStyle.Render("Filter: ") + detailStyle.Render("/ filter · f file search")
+		hint := "/ filter · f file search"
+		if !m.chrome.footer {
+			// no help line on a short screen — name the keys here instead
+			hint = "/ filter · f files · a all · c copy · q quit"
+		}
+		return filterPromptStyle.Render("Filter: ") + detailStyle.Render(hint)
 	}
 	return l.FilterInput.View()
 }
 
 func (m uiModel) View() string {
 	l := m.active()
-	header := lipgloss.JoinVertical(lipgloss.Left,
-		titleStyle.Render(l.Title),
-		"", // blank line above the filter
-		m.filterLine(),
-	)
-	// title · blank · filter · blank separator · list body — reservedRows tall.
-	return docStyle.Render(lipgloss.JoinVertical(lipgloss.Left, header, "", l.View()))
+	// title · blank · filter · blank separator · list body — the header is
+	// reservedRows tall. Compact: the title badge shares the filter's row and
+	// the list starts on the next line.
+	rows := []string{clip(titleStyle.Render(l.Title)+" "+m.filterLine(), m.width)}
+	if m.chrome.title {
+		rows = []string{titleStyle.Render(l.Title), "", clip(m.filterLine(), m.width), ""}
+	}
+	return m.chrome.doc().Render(lipgloss.JoinVertical(lipgloss.Left, append(rows, l.View())...))
 }
 
 // cmdUI runs the interactive picker and applies the selection with the same
