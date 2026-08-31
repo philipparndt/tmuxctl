@@ -6,11 +6,33 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
+// tmuxBin resolves the tmux binary once. A display-popup inherits the tmux
+// server's environment, whose PATH can lack the directory tmux was installed
+// to (e.g. /opt/homebrew/bin when the server was started by launchd) — so
+// when LookPath fails, fall back to the usual install locations.
+var tmuxBin = sync.OnceValue(func() string {
+	if p, err := exec.LookPath("tmux"); err == nil {
+		return p
+	}
+	for _, p := range []string{
+		"/opt/homebrew/bin/tmux",
+		"/usr/local/bin/tmux",
+		"/usr/bin/tmux",
+		"/opt/local/bin/tmux",
+	} {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	return "tmux"
+})
+
 func tmux(args ...string) (string, error) {
-	out, err := exec.Command("tmux", args...).CombinedOutput()
+	out, err := exec.Command(tmuxBin(), args...).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("tmux %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
@@ -133,7 +155,7 @@ func currentSessionTarget() string {
 // session it returns the id of the session's initial placeholder window, so
 // the caller can remove it once a real window has been added.
 func ensureSession(name, dir string) (string, error) {
-	if err := exec.Command("tmux", "has-session", "-t", "="+name).Run(); err == nil {
+	if err := exec.Command(tmuxBin(), "has-session", "-t", "="+name).Run(); err == nil {
 		return "", nil
 	}
 	return tmux("new-session", "-d", "-s", name, "-c", dir, "-P", "-F", "#{window_id}")

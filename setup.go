@@ -105,7 +105,7 @@ func cmdSetup(args []string) {
 	}
 	fmt.Printf("updated %s: prefix + %s opens the picker\n", path, *bindKey)
 
-	if exec.Command("tmux", "source-file", path).Run() == nil {
+	if exec.Command(tmuxBin(), "source-file", path).Run() == nil {
 		fmt.Println("reloaded tmux config")
 	} else {
 		fmt.Println("no running tmux server reloaded - the binding is active once tmux starts")
